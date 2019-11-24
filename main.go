@@ -256,6 +256,18 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		psk = nil
 	}
 
+	altPSKs := [][]byte{}
+	altPSKStrings := config.GetStringSlice("psk.accepted_keys", []string{})
+	if len(altPSKStrings) > 0 {
+		for i, aps := range altPSKStrings {
+			altpsk, err := sha256KdfFromString(aps)
+			if err != nil {
+				l.WithError(err).Fatal("PSK Error")
+			}
+			altPSKs[i] = make([]byte{altpsk})
+		}
+	}
+
 	checkInterval := config.GetInt("timers.connection_alive_interval", 5)
 	pendingDeletionInterval := config.GetInt("timers.pending_deletion_interval", 10)
 	ifConfig := &InterfaceConfig{
@@ -273,6 +285,7 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		DropLocalBroadcast:      config.GetBool("tun.drop_local_broadcast", false),
 		DropMulticast:           config.GetBool("tun.drop_multicast", false),
 		PSK:                     psk,
+		AltPSKs:                 altPSKs,
 		UDPBatchSize:            config.GetInt("listen.batch", 64),
 	}
 
