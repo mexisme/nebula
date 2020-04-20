@@ -82,6 +82,10 @@ func Main(configPath string, configTest bool, buildVersion string) {
 	if err != nil {
 		l.WithError(err).Fatal("Could not parse tun.routes")
 	}
+	unsafeRoutes, err := parseUnsafeRoutes(config, tunCidr)
+	if err != nil {
+		l.WithError(err).Fatal("Could not parse tun.unsafe_routes")
+	}
 
 	ssh, err := sshd.NewSSHServer(l.WithField("subsystem", "sshd"))
 	wireSSHReload(ssh, config)
@@ -97,31 +101,35 @@ func Main(configPath string, configTest bool, buildVersion string) {
 	// tun config, listeners, anything modifying the computer should be below
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	if configTest {
-		os.Exit(0)
-	}
+	var tun *Tun
+	if !configTest {
+		config.CatchHUP()
 
-	config.CatchHUP()
-
-	// set up our tun dev
-	tun, err := newTun(
-		config.GetString("tun.dev", ""),
-		tunCidr,
-		config.GetInt("tun.mtu", 1300),
-		routes,
-		config.GetInt("tun.tx_queue", 500),
-	)
-	if err != nil {
-		l.WithError(err).Fatal("Failed to get a tun/tap device")
+		// set up our tun dev
+		tun, err = newTun(
+			config.GetString("tun.dev", ""),
+			tunCidr,
+			config.GetInt("tun.mtu", DEFAULT_MTU),
+			routes,
+			unsafeRoutes,
+			config.GetInt("tun.tx_queue", 500),
+		)
+		if err != nil {
+			l.WithError(err).Fatal("Failed to get a tun/tap device")
+		}
 	}
 
 	// set up our UDP listener
 	udpQueues := config.GetInt("listen.routines", 1)
-	udpServer, err := NewListener(config.GetString("listen.host", "0.0.0.0"), config.GetInt("listen.port", 0), udpQueues > 1)
-	if err != nil {
-		l.WithError(err).Fatal("Failed to open udp listener")
+	var udpServer *udpConn
+
+	if !configTest {
+		udpServer, err = NewListener(config.GetString("listen.host", "0.0.0.0"), config.GetInt("listen.port", 0), udpQueues > 1)
+		if err != nil {
+			l.WithError(err).Fatal("Failed to open udp listener")
+		}
+		udpServer.reloadConfig(config)
 	}
-	udpServer.reloadConfig(config)
 
 	// Set up my internal host map
 	var preferredRanges []*net.IPNet
@@ -163,6 +171,8 @@ func Main(configPath string, configTest bool, buildVersion string) {
 
 	hostMap := NewHostMap("main", tunCidr, preferredRanges)
 	hostMap.SetDefaultRoute(ip2int(net.ParseIP(config.GetString("default_route", "0.0.0.0"))))
+	hostMap.addUnsafeRoutes(&unsafeRoutes)
+
 	l.WithField("network", hostMap.vpnCIDR).WithField("preferredRanges", hostMap.preferredRanges).Info("Main HostMap created")
 
 	/*
@@ -170,15 +180,15 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		go hostMap.Promoter(config.GetInt("promoter.interval"))
 	*/
 
-	punchy := config.GetBool("punchy", false)
-	if punchy == true {
+	punchy := NewPunchyFromConfig(config)
+	if punchy.Punch && !configTest {
 		l.Info("UDP hole punching enabled")
 		go hostMap.Punchy(udpServer)
 	}
 
 	port := config.GetInt("listen.port", 0)
 	// If port is dynamic, discover it
-	if port == 0 {
+	if port == 0 && !configTest {
 		uPort, err := udpServer.LocalAddr()
 		if err != nil {
 			l.WithError(err).Fatal("Failed to get listening port")
@@ -186,7 +196,6 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		port = int(uPort.Port)
 	}
 
-	punchBack := config.GetBool("punch_back", false)
 	amLighthouse := config.GetBool("lighthouse.am_lighthouse", false)
 
 	// warn if am_lighthouse is enabled but upstream lighthouses exists
@@ -201,10 +210,12 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		if ip == nil {
 			l.WithField("host", host).Fatalf("Unable to parse lighthouse host entry %v", i+1)
 		}
+		if !tunCidr.Contains(ip) {
+			l.WithField("vpnIp", ip).WithField("network", tunCidr.String()).Fatalf("lighthouse host is not in our subnet, invalid")
+		}
 		lighthouseHosts[i] = ip2int(ip)
 	}
 
-	serveDns := config.GetBool("lighthouse.serve_dns", false)
 	lightHouse := NewLightHouse(
 		amLighthouse,
 		ip2int(tunCidr.IP),
@@ -213,17 +224,28 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		config.GetInt("lighthouse.interval", 10),
 		port,
 		udpServer,
-		punchBack,
+		punchy.Respond,
+		punchy.Delay,
 	)
 
-	if amLighthouse && serveDns {
-		l.Debugln("Starting dns server")
-		go dnsMain(hostMap)
+	remoteAllowList, err := config.GetAllowList("lighthouse.remote_allow_list", false)
+	if err != nil {
+		l.WithError(err).Fatal("Invalid lighthouse.remote_allow_list")
 	}
+	lightHouse.SetRemoteAllowList(remoteAllowList)
+
+	localAllowList, err := config.GetAllowList("lighthouse.local_allow_list", true)
+	if err != nil {
+		l.WithError(err).Fatal("Invalid lighthouse.local_allow_list")
+	}
+	lightHouse.SetLocalAllowList(localAllowList)
 
 	//TODO: Move all of this inside functions in lighthouse.go
 	for k, v := range config.GetMap("static_host_map", map[interface{}]interface{}{}) {
 		vpnIp := net.ParseIP(fmt.Sprintf("%v", k))
+		if !tunCidr.Contains(vpnIp) {
+			l.WithField("vpnIp", vpnIp).WithField("network", tunCidr.String()).Fatalf("static_host_map key is not in our subnet, invalid")
+		}
 		vals, ok := v.([]interface{})
 		if ok {
 			for _, v := range vals {
@@ -258,12 +280,19 @@ func Main(configPath string, configTest bool, buildVersion string) {
 		l.WithError(err).Error("Lighthouse unreachable")
 	}
 
-	handshakeManager := NewHandshakeManager(tunCidr, preferredRanges, hostMap, lightHouse, udpServer)
+	handshakeConfig := HandshakeConfig{
+		tryInterval:  config.GetDuration("handshakes.try_interval", DefaultHandshakeTryInterval),
+		retries:      config.GetInt("handshakes.retries", DefaultHandshakeRetries),
+		waitRotation: config.GetInt("handshakes.wait_rotation", DefaultHandshakeWaitRotation),
+	}
+
+	handshakeManager := NewHandshakeManager(tunCidr, preferredRanges, hostMap, lightHouse, udpServer, handshakeConfig)
 
 	//TODO: These will be reused for psk
 	//handshakeMACKey := config.GetString("handshake_mac.key", "")
 	//handshakeAcceptedMACKeys := config.GetStringSlice("handshake_mac.accepted_keys", []string{})
 
+	serveDns := config.GetBool("lighthouse.serve_dns", false)
 	checkInterval := config.GetInt("timers.connection_alive_interval", 5)
 	pendingDeletionInterval := config.GetInt("timers.pending_deletion_interval", 10)
 	ifConfig := &InterfaceConfig{
@@ -285,26 +314,33 @@ func Main(configPath string, configTest bool, buildVersion string) {
 
 	switch ifConfig.Cipher {
 	case "aes":
-		noiseEndiannes = binary.BigEndian
+		noiseEndianness = binary.BigEndian
 	case "chachapoly":
-		noiseEndiannes = binary.LittleEndian
+		noiseEndianness = binary.LittleEndian
 	default:
 		l.Fatalf("Unknown cipher: %v", ifConfig.Cipher)
 	}
 
-	ifce, err := NewInterface(ifConfig)
-	if err != nil {
-		l.WithError(err).Fatal("Failed to initialize interface")
+	var ifce *Interface
+	if !configTest {
+		ifce, err = NewInterface(ifConfig)
+		if err != nil {
+			l.WithError(err).Fatal("Failed to initialize interface")
+		}
+
+		ifce.RegisterConfigChangeCallbacks(config)
+
+		go handshakeManager.Run(ifce)
+		go lightHouse.LhUpdateWorker(ifce)
 	}
 
-	ifce.RegisterConfigChangeCallbacks(config)
-
-	go handshakeManager.Run(ifce)
-	go lightHouse.LhUpdateWorker(ifce)
-
-	err = startStats(config)
+	err = startStats(config, configTest)
 	if err != nil {
 		l.WithError(err).Fatal("Failed to start stats emitter")
+	}
+
+	if configTest {
+		os.Exit(0)
 	}
 
 	//TODO: check if we _should_ be emitting stats
@@ -312,6 +348,12 @@ func Main(configPath string, configTest bool, buildVersion string) {
 
 	attachCommands(ssh, hostMap, handshakeManager.pendingHostMap, lightHouse, ifce)
 	ifce.Run(config.GetInt("tun.routines", 1), udpQueues, buildVersion)
+
+	// Start DNS server last to allow using the nebula IP as lighthouse.dns.host
+	if amLighthouse && serveDns {
+		l.Debugln("Starting dns server")
+		go dnsMain(hostMap, config)
+	}
 
 	// Just sit here and be friendly, main thread.
 	shutdownBlock(ifce)

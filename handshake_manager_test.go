@@ -11,16 +11,17 @@ import (
 var indexes []uint32 = []uint32{1000, 2000, 3000, 4000}
 
 //var ips []uint32 = []uint32{9000, 9999999, 3, 292394923}
-var ips []uint32 = []uint32{9000}
+var ips []uint32
 
 func Test_NewHandshakeManagerIndex(t *testing.T) {
-	_, tuncidr, _ := net.ParseCIDR("1.1.1.1/24")
+	_, tuncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, vpncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, localrange, _ := net.ParseCIDR("10.1.1.1/24")
+	ips = []uint32{ip2int(net.ParseIP("172.1.1.2"))}
 	preferredRanges := []*net.IPNet{localrange}
 	mainHM := NewHostMap("test", vpncidr, preferredRanges)
 
-	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{})
+	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{}, defaultHandshakeConfig)
 
 	now := time.Now()
 	blah.NextInboundHandshakeTimerTick(now)
@@ -36,8 +37,8 @@ func Test_NewHandshakeManagerIndex(t *testing.T) {
 	// Adding something to pending should not affect the main hostmap
 	assert.Len(t, mainHM.Indexes, 0)
 	// Jump ahead 8 seconds
-	for i := 1; i <= HandshakeRetries; i++ {
-		next_tick := now.Add(HandshakeTryInterval * time.Duration(i))
+	for i := 1; i <= DefaultHandshakeRetries; i++ {
+		next_tick := now.Add(DefaultHandshakeTryInterval * time.Duration(i))
 		blah.NextInboundHandshakeTimerTick(next_tick)
 	}
 	// Confirm they are still in the pending index list
@@ -54,14 +55,15 @@ func Test_NewHandshakeManagerIndex(t *testing.T) {
 }
 
 func Test_NewHandshakeManagerVpnIP(t *testing.T) {
-	_, tuncidr, _ := net.ParseCIDR("1.1.1.1/24")
+	_, tuncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, vpncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, localrange, _ := net.ParseCIDR("10.1.1.1/24")
+	ips = []uint32{ip2int(net.ParseIP("172.1.1.2"))}
 	preferredRanges := []*net.IPNet{localrange}
 	mw := &mockEncWriter{}
 	mainHM := NewHostMap("test", vpncidr, preferredRanges)
 
-	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{})
+	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{}, defaultHandshakeConfig)
 
 	now := time.Now()
 	blah.NextOutboundHandshakeTimerTick(now, mw)
@@ -79,8 +81,8 @@ func Test_NewHandshakeManagerVpnIP(t *testing.T) {
 
 	// Jump ahead `HandshakeRetries` ticks
 	cumulative := time.Duration(0)
-	for i := 0; i <= HandshakeRetries+1; i++ {
-		cumulative += time.Duration(i)*HandshakeTryInterval + 1
+	for i := 0; i <= DefaultHandshakeRetries+1; i++ {
+		cumulative += time.Duration(i)*DefaultHandshakeTryInterval + 1
 		next_tick := now.Add(cumulative)
 		//l.Infoln(next_tick)
 		blah.NextOutboundHandshakeTimerTick(next_tick, mw)
@@ -91,7 +93,7 @@ func Test_NewHandshakeManagerVpnIP(t *testing.T) {
 		assert.Contains(t, blah.pendingHostMap.Hosts, uint32(v))
 	}
 	// Jump ahead 1 more second
-	cumulative += time.Duration(HandshakeRetries+1) * HandshakeTryInterval
+	cumulative += time.Duration(DefaultHandshakeRetries+1) * DefaultHandshakeTryInterval
 	next_tick := now.Add(cumulative)
 	//l.Infoln(next_tick)
 	blah.NextOutboundHandshakeTimerTick(next_tick, mw)
@@ -102,19 +104,20 @@ func Test_NewHandshakeManagerVpnIP(t *testing.T) {
 }
 
 func Test_NewHandshakeManagerVpnIPcleanup(t *testing.T) {
-	_, tuncidr, _ := net.ParseCIDR("1.1.1.1/24")
+	_, tuncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, vpncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, localrange, _ := net.ParseCIDR("10.1.1.1/24")
+	vpnIP = ip2int(net.ParseIP("172.1.1.2"))
 	preferredRanges := []*net.IPNet{localrange}
 	mw := &mockEncWriter{}
 	mainHM := NewHostMap("test", vpncidr, preferredRanges)
 
-	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{})
+	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{}, defaultHandshakeConfig)
 
 	now := time.Now()
 	blah.NextOutboundHandshakeTimerTick(now, mw)
 
-	hostinfo := blah.AddVpnIP(101010)
+	hostinfo := blah.AddVpnIP(vpnIP)
 	// Pretned we have an index too
 	blah.AddIndexHostInfo(12341234, hostinfo)
 	assert.Contains(t, blah.pendingHostMap.Indexes, uint32(12341234))
@@ -122,8 +125,8 @@ func Test_NewHandshakeManagerVpnIPcleanup(t *testing.T) {
 	// Jump ahead `HandshakeRetries` ticks. Eviction should happen in pending
 	// but not main hostmap
 	cumulative := time.Duration(0)
-	for i := 1; i <= HandshakeRetries+2; i++ {
-		cumulative += HandshakeTryInterval * time.Duration(i)
+	for i := 1; i <= DefaultHandshakeRetries+2; i++ {
+		cumulative += DefaultHandshakeTryInterval * time.Duration(i)
 		next_tick := now.Add(cumulative)
 		blah.NextOutboundHandshakeTimerTick(next_tick, mw)
 	}
@@ -147,18 +150,18 @@ func Test_NewHandshakeManagerVpnIPcleanup(t *testing.T) {
 		l.Infoln(cumulative, next_tick)
 		blah.NextOutboundHandshakeTimerTick(next_tick)
 	*/
-	assert.NotContains(t, blah.pendingHostMap.Hosts, uint32(101010))
+	assert.NotContains(t, blah.pendingHostMap.Hosts, uint32(vpnIP))
 	assert.NotContains(t, blah.pendingHostMap.Indexes, uint32(12341234))
 }
 
 func Test_NewHandshakeManagerIndexcleanup(t *testing.T) {
-	_, tuncidr, _ := net.ParseCIDR("1.1.1.1/24")
+	_, tuncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, vpncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, localrange, _ := net.ParseCIDR("10.1.1.1/24")
 	preferredRanges := []*net.IPNet{localrange}
 	mainHM := NewHostMap("test", vpncidr, preferredRanges)
 
-	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{})
+	blah := NewHandshakeManager(tuncidr, preferredRanges, mainHM, &LightHouse{}, &udpConn{}, defaultHandshakeConfig)
 
 	now := time.Now()
 	blah.NextInboundHandshakeTimerTick(now)
@@ -168,12 +171,12 @@ func Test_NewHandshakeManagerIndexcleanup(t *testing.T) {
 	blah.pendingHostMap.AddVpnIPHostInfo(101010, hostinfo)
 	assert.Contains(t, blah.pendingHostMap.Hosts, uint32(101010))
 
-	for i := 1; i <= HandshakeRetries+2; i++ {
-		next_tick := now.Add(HandshakeTryInterval * time.Duration(i))
+	for i := 1; i <= DefaultHandshakeRetries+2; i++ {
+		next_tick := now.Add(DefaultHandshakeTryInterval * time.Duration(i))
 		blah.NextInboundHandshakeTimerTick(next_tick)
 	}
 
-	next_tick := now.Add(HandshakeTryInterval*HandshakeRetries + 3)
+	next_tick := now.Add(DefaultHandshakeTryInterval*DefaultHandshakeRetries + 3)
 	blah.NextInboundHandshakeTimerTick(next_tick)
 	assert.NotContains(t, blah.pendingHostMap.Hosts, uint32(101010))
 	assert.NotContains(t, blah.pendingHostMap.Indexes, uint32(12341234))

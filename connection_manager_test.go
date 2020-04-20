@@ -10,12 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var vpnIP uint32 = uint32(12341234)
+var vpnIP uint32
 
 func Test_NewConnectionManagerTest(t *testing.T) {
 	//_, tuncidr, _ := net.ParseCIDR("1.1.1.1/24")
 	_, vpncidr, _ := net.ParseCIDR("172.1.1.1/24")
 	_, localrange, _ := net.ParseCIDR("10.1.1.1/24")
+	vpnIP = ip2int(net.ParseIP("172.1.1.2"))
 	preferredRanges := []*net.IPNet{localrange}
 
 	// Very incomplete mock objects
@@ -27,7 +28,7 @@ func Test_NewConnectionManagerTest(t *testing.T) {
 		rawCertificateNoKey: []byte{},
 	}
 
-	lh := NewLightHouse(false, 0, []uint32{}, 1000, 0, &udpConn{}, false)
+	lh := NewLightHouse(false, 0, []uint32{}, 1000, 0, &udpConn{}, false, 1)
 	ifce := &Interface{
 		hostMap:          hostMap,
 		inside:           &Tun{},
@@ -35,7 +36,7 @@ func Test_NewConnectionManagerTest(t *testing.T) {
 		certState:        cs,
 		firewall:         &Firewall{},
 		lightHouse:       lh,
-		handshakeManager: NewHandshakeManager(vpncidr, preferredRanges, hostMap, lh, &udpConn{}),
+		handshakeManager: NewHandshakeManager(vpncidr, preferredRanges, hostMap, lh, &udpConn{}, defaultHandshakeConfig),
 	}
 	now := time.Now()
 
@@ -90,7 +91,7 @@ func Test_NewConnectionManagerTest2(t *testing.T) {
 		rawCertificateNoKey: []byte{},
 	}
 
-	lh := NewLightHouse(false, 0, []uint32{}, 1000, 0, &udpConn{}, false)
+	lh := NewLightHouse(false, 0, []uint32{}, 1000, 0, &udpConn{}, false, 1)
 	ifce := &Interface{
 		hostMap:          hostMap,
 		inside:           &Tun{},
@@ -98,7 +99,7 @@ func Test_NewConnectionManagerTest2(t *testing.T) {
 		certState:        cs,
 		firewall:         &Firewall{},
 		lightHouse:       lh,
-		handshakeManager: NewHandshakeManager(vpncidr, preferredRanges, hostMap, lh, &udpConn{}),
+		handshakeManager: NewHandshakeManager(vpncidr, preferredRanges, hostMap, lh, &udpConn{}, defaultHandshakeConfig),
 	}
 	now := time.Now()
 

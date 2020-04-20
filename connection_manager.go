@@ -1,9 +1,10 @@
 package nebula
 
 import (
-	"github.com/sirupsen/logrus"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // TODO: incount and outcount are intended as a shortcut to locking the mutexes for every single packet
@@ -181,7 +182,7 @@ func (n *connectionManager) HandleMonitorTick(now time.Time) {
 			continue
 		}
 
-		l.WithField("vpnIp", IntIp(vpnIP)).
+		hostinfo.logger().
 			WithField("tunnelCheck", m{"state": "testing", "method": "active"}).
 			Debug("Tunnel status")
 
@@ -190,7 +191,7 @@ func (n *connectionManager) HandleMonitorTick(now time.Time) {
 			n.intf.SendMessageToVpnIp(test, testRequest, vpnIP, []byte(""), make([]byte, 12, 12), make([]byte, mtu))
 
 		} else {
-			l.Debugf("Hostinfo sadness: %s", IntIp(vpnIP))
+			hostinfo.logger().Debugf("Hostinfo sadness: %s", IntIp(vpnIP))
 		}
 		n.AddPendingDeletion(vpnIP)
 	}
@@ -232,7 +233,7 @@ func (n *connectionManager) HandleDeletionTick(now time.Time) {
 			if hostinfo.ConnectionState != nil && hostinfo.ConnectionState.peerCert != nil {
 				cn = hostinfo.ConnectionState.peerCert.Details.Name
 			}
-			l.WithField("vpnIp", IntIp(vpnIP)).
+			hostinfo.logger().
 				WithField("tunnelCheck", m{"state": "dead", "method": "active"}).
 				WithField("certName", cn).
 				Info("Tunnel status")

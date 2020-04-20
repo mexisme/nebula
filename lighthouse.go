@@ -19,6 +19,16 @@ type LightHouse struct {
 	// Local cache of answers from light houses
 	addrMap map[uint32][]udpAddr
 
+	// filters remote addresses allowed for each host
+	// - When we are a lighthouse, this filters what addresses we store and
+	// respond with.
+	// - When we are not a lighthouse, this filters which addresses we accept
+	// from lighthouses.
+	remoteAllowList *AllowList
+
+	// filters local addresses that we advertise to lighthouses
+	localAllowList *AllowList
+
 	// staticList exists to avoid having a bool in each addrMap entry
 	// since static should be rare
 	staticList  map[uint32]struct{}
@@ -26,6 +36,7 @@ type LightHouse struct {
 	interval    int
 	nebulaPort  int
 	punchBack   bool
+	punchDelay  time.Duration
 }
 
 type EncWriter interface {
@@ -33,7 +44,7 @@ type EncWriter interface {
 	SendMessageToAll(t NebulaMessageType, st NebulaMessageSubType, vpnIp uint32, p, nb, out []byte)
 }
 
-func NewLightHouse(amLighthouse bool, myIp uint32, ips []uint32, interval int, nebulaPort int, pc *udpConn, punchBack bool) *LightHouse {
+func NewLightHouse(amLighthouse bool, myIp uint32, ips []uint32, interval int, nebulaPort int, pc *udpConn, punchBack bool, punchDelay time.Duration) *LightHouse {
 	h := LightHouse{
 		amLighthouse: amLighthouse,
 		myIp:         myIp,
@@ -44,6 +55,7 @@ func NewLightHouse(amLighthouse bool, myIp uint32, ips []uint32, interval int, n
 		interval:     interval,
 		punchConn:    pc,
 		punchBack:    punchBack,
+		punchDelay:   punchDelay,
 	}
 
 	for _, ip := range ips {
@@ -53,12 +65,23 @@ func NewLightHouse(amLighthouse bool, myIp uint32, ips []uint32, interval int, n
 	return &h
 }
 
+func (lh *LightHouse) SetRemoteAllowList(allowList *AllowList) {
+	lh.Lock()
+	defer lh.Unlock()
+
+	lh.remoteAllowList = allowList
+}
+
+func (lh *LightHouse) SetLocalAllowList(allowList *AllowList) {
+	lh.Lock()
+	defer lh.Unlock()
+
+	lh.localAllowList = allowList
+}
+
 func (lh *LightHouse) ValidateLHStaticEntries() error {
 	for lhIP, _ := range lh.lighthouses {
-		for ip, _ := range lh.staticList {
-			if lhIP == ip {
-				continue
-			}
+		if _, ok := lh.staticList[lhIP]; !ok {
 			return fmt.Errorf("Lighthouse %s does not have a static_host_map entry", IntIp(lhIP))
 		}
 	}
@@ -136,6 +159,13 @@ func (lh *LightHouse) AddRemote(vpnIP uint32, toIp *udpAddr, static bool) {
 			return
 		}
 	}
+
+	allow := lh.remoteAllowList.Allow(udp2ipInt(toIp))
+	l.WithField("remoteIp", toIp).WithField("allow", allow).Debug("remoteAllowList.Allow")
+	if !allow {
+		return
+	}
+
 	//l.Debugf("Adding reply of %s as %s\n", IntIp(vpnIP), toIp)
 	if static {
 		lh.staticList[vpnIP] = struct{}{}
@@ -197,14 +227,14 @@ func NewIpAndPortsFromNetIps(ips []udpAddr) *[]*IpAndPort {
 }
 
 func (lh *LightHouse) LhUpdateWorker(f EncWriter) {
-	if lh.amLighthouse {
+	if lh.amLighthouse || lh.interval == 0 {
 		return
 	}
 
 	for {
 		ipp := []*IpAndPort{}
 
-		for _, e := range *localIps() {
+		for _, e := range *localIps(lh.localAllowList) {
 			// Only add IPs that aren't my VPN/tun IP
 			if ip2int(e) != lh.myIp {
 				ipp = append(ipp, &IpAndPort{Ip: ip2int(e), Port: uint32(lh.nebulaPort)})
@@ -331,10 +361,8 @@ func (lh *LightHouse) HandleRequest(rAddr *udpAddr, vpnIp uint32, p []byte, c *c
 		for _, a := range n.Details.IpAndPorts {
 			vpnPeer := NewUDPAddr(a.Ip, uint16(a.Port))
 			go func() {
-				for i := 0; i < 5; i++ {
-					lh.punchConn.WriteTo(empty, vpnPeer)
-					time.Sleep(time.Second * 1)
-				}
+				time.Sleep(lh.punchDelay)
+				lh.punchConn.WriteTo(empty, vpnPeer)
 
 			}()
 			l.Debugf("Punching %s on %d for %s", IntIp(a.Ip), a.Port, IntIp(n.Details.VpnIp))

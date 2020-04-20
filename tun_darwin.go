@@ -10,21 +10,23 @@ import (
 )
 
 type Tun struct {
-	Device string
-	Cidr   *net.IPNet
-	MTU    int
+	Device       string
+	Cidr         *net.IPNet
+	MTU          int
+	UnsafeRoutes []route
 
 	*water.Interface
 }
 
-func newTun(deviceName string, cidr *net.IPNet, defaultMTU int, routes []route, txQueueLen int) (ifce *Tun, err error) {
+func newTun(deviceName string, cidr *net.IPNet, defaultMTU int, routes []route, unsafeRoutes []route, txQueueLen int) (ifce *Tun, err error) {
 	if len(routes) > 0 {
 		return nil, fmt.Errorf("Route MTU not supported in Darwin")
 	}
 	// NOTE: You cannot set the deviceName under Darwin, so you must check tun.Device after calling .Activate()
 	return &Tun{
-		Cidr: cidr,
-		MTU:  defaultMTU,
+		Cidr:         cidr,
+		MTU:          defaultMTU,
+		UnsafeRoutes: unsafeRoutes,
 	}, nil
 }
 
@@ -40,14 +42,20 @@ func (c *Tun) Activate() error {
 	c.Device = c.Interface.Name()
 
 	// TODO use syscalls instead of exec.Command
-	if err = exec.Command("ifconfig", c.Device, c.Cidr.String(), c.Cidr.IP.String()).Run(); err != nil {
+	if err = exec.Command("/sbin/ifconfig", c.Device, c.Cidr.String(), c.Cidr.IP.String()).Run(); err != nil {
 		return fmt.Errorf("failed to run 'ifconfig': %s", err)
 	}
-	if err = exec.Command("route", "-n", "add", "-net", c.Cidr.String(), "-interface", c.Device).Run(); err != nil {
+	if err = exec.Command("/sbin/route", "-n", "add", "-net", c.Cidr.String(), "-interface", c.Device).Run(); err != nil {
 		return fmt.Errorf("failed to run 'route add': %s", err)
 	}
-	if err = exec.Command("ifconfig", c.Device, "mtu", strconv.Itoa(c.MTU)).Run(); err != nil {
+	if err = exec.Command("/sbin/ifconfig", c.Device, "mtu", strconv.Itoa(c.MTU)).Run(); err != nil {
 		return fmt.Errorf("failed to run 'ifconfig': %s", err)
+	}
+	// Unsafe path routes
+	for _, r := range c.UnsafeRoutes {
+		if err = exec.Command("/sbin/route", "-n", "add", "-net", r.route.String(), "-interface", c.Device).Run(); err != nil {
+			return fmt.Errorf("failed to run 'route add' for unsafe_route %s: %s", r.route.String(), err)
+		}
 	}
 
 	return nil

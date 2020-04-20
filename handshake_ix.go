@@ -125,10 +125,12 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 			return true
 		}
 		vpnIP := ip2int(remoteCert.Details.Ips[0].IP)
+		certName := remoteCert.Details.Name
 
 		myIndex, err := generateIndex()
 		if err != nil {
 			l.WithError(err).WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+				WithField("certName", certName).
 				WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).Error("Failed to generate index")
 			return true
 		}
@@ -136,11 +138,13 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		hostinfo, err = f.handshakeManager.AddIndex(myIndex, ci)
 		if err != nil {
 			l.WithError(err).WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+				WithField("certName", certName).
 				WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).Error("Error adding index to connection manager")
 
 			return true
 		}
 		l.WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+			WithField("certName", certName).
 			WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 			WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
 			Info("Handshake message received")
@@ -152,6 +156,7 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		hsBytes, err := proto.Marshal(hs)
 		if err != nil {
 			l.WithError(err).WithField("vpnIp", IntIp(hostinfo.hostId)).WithField("udpAddr", addr).
+				WithField("certName", certName).
 				WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).Error("Failed to marshal handshake message")
 			return true
 		}
@@ -160,12 +165,14 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		msg, dKey, eKey, err := ci.H.WriteMessage(header, hsBytes)
 		if err != nil {
 			l.WithError(err).WithField("vpnIp", IntIp(hostinfo.hostId)).WithField("udpAddr", addr).
+				WithField("certName", certName).
 				WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).Error("Failed to call noise.WriteMessage")
 			return true
 		}
 
 		if f.hostMap.CheckHandshakeCompleteIP(vpnIP) && vpnIP < ip2int(f.certState.certificate.Details.Ips[0].IP) {
 			l.WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+				WithField("certName", certName).
 				WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 				WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
 				Info("Prevented a handshake race")
@@ -187,11 +194,13 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 			err := f.outside.WriteTo(msg, addr)
 			if err != nil {
 				l.WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+					WithField("certName", certName).
 					WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 					WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 2, "style": "ix_psk0"}).
 					WithError(err).Error("Failed to send handshake")
 			} else {
 				l.WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+					WithField("certName", certName).
 					WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 					WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 2, "style": "ix_psk0"}).
 					Info("Handshake message sent")
@@ -205,6 +214,7 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 
 			//hostinfo.ClearRemotes()
 			hostinfo.AddRemote(*addr)
+			hostinfo.CreateRemoteCIDR(remoteCert)
 			f.lightHouse.AddRemoteAndReset(ip, addr)
 			if f.serveDns {
 				dnsR.Add(remoteCert.Details.Name+".", remoteCert.Details.Ips[0].IP.String())
@@ -213,6 +223,7 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 			ho, err := f.hostMap.QueryVpnIP(vpnIP)
 			if err == nil && ho.localIndexId != 0 {
 				l.WithField("vpnIp", vpnIP).
+					WithField("certName", certName).
 					WithField("action", "removing stale index").
 					WithField("index", ho.localIndexId).
 					Debug("Handshake processing")
@@ -225,6 +236,7 @@ func ixHandshakeStage1(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 			hostinfo.handshakeComplete()
 		} else {
 			l.WithField("vpnIp", IntIp(hostinfo.hostId)).WithField("udpAddr", addr).
+				WithField("certName", certName).
 				WithField("handshake", m{"stage": 1, "style": "ix_psk0"}).
 				Error("Noise did not arrive at a key")
 			return true
@@ -283,9 +295,11 @@ func ixHandshakeStage2(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		return true
 	}
 	vpnIP := ip2int(remoteCert.Details.Ips[0].IP)
+	certName := remoteCert.Details.Name
 
 	duration := time.Since(hostinfo.handshakeStart).Nanoseconds()
 	l.WithField("vpnIp", IntIp(vpnIP)).WithField("udpAddr", addr).
+		WithField("certName", certName).
 		WithField("initiatorIndex", hs.Details.InitiatorIndex).WithField("responderIndex", hs.Details.ResponderIndex).
 		WithField("remoteIndex", h.RemoteIndex).WithField("handshake", m{"stage": 2, "style": "ix_psk0"}).
 		WithField("durationNs", duration).
@@ -314,6 +328,7 @@ func ixHandshakeStage2(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 
 		//hostinfo.ClearRemotes()
 		f.hostMap.AddRemote(ip, addr)
+		hostinfo.CreateRemoteCIDR(remoteCert)
 		f.lightHouse.AddRemoteAndReset(ip, addr)
 		if f.serveDns {
 			dnsR.Add(remoteCert.Details.Name+".", remoteCert.Details.Ips[0].IP.String())
@@ -322,6 +337,7 @@ func ixHandshakeStage2(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		ho, err := f.hostMap.QueryVpnIP(vpnIP)
 		if err == nil && ho.localIndexId != 0 {
 			l.WithField("vpnIp", vpnIP).
+				WithField("certName", certName).
 				WithField("action", "removing stale index").
 				WithField("index", ho.localIndexId).
 				Debug("Handshake processing")
@@ -335,6 +351,7 @@ func ixHandshakeStage2(f *Interface, addr *udpAddr, hostinfo *HostInfo, packet [
 		f.metricHandshakes.Update(duration)
 	} else {
 		l.WithField("vpnIp", IntIp(hostinfo.hostId)).WithField("udpAddr", addr).
+			WithField("certName", certName).
 			WithField("handshake", m{"stage": 2, "style": "ix_psk0"}).
 			Error("Noise did not arrive at a key")
 		return true

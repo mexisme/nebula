@@ -3,83 +3,65 @@ BUILD_NUMBER ?= dev+$(shell date -u '+%Y%m%d%H%M%S')
 GO111MODULE = on
 export GO111MODULE
 
-all: bin-linux bin-arm bin-arm6 bin-arm64 bin-darwin bin-windows bin-mips bin-mipsle bin-mips64 bin-mips64le
+ALL_LINUX = linux-amd64 \
+	linux-386 \
+	linux-ppc64le \
+	linux-arm-5 \
+	linux-arm-6 \
+	linux-arm-7 \
+	linux-arm64 \
+	linux-mips \
+	linux-mipsle \
+	linux-mips64 \
+	linux-mips64le
+
+ALL = $(ALL_LINUX) \
+	darwin-amd64 \
+	windows-amd64
+
+all: $(ALL:%=build/%/nebula) $(ALL:%=build/%/nebula-cert)
+
+release: $(ALL:%=build/nebula-%.tar.gz)
+
+release-linux: $(ALL_LINUX:%=build/nebula-%.tar.gz)
+
+bin-windows: build/windows-amd64/nebula.exe build/windows-amd64/nebula-cert.exe
+	mv $? .
+
+bin-darwin: build/darwin-amd64/nebula build/darwin-amd64/nebula-cert
+	mv $? .
 
 bin:
-	go build -ldflags "-X main.Build=$(BUILD_NUMBER)" -o ./nebula ${NEBULA_CMD_PATH}
-	go build -ldflags "-X main.Build=$(BUILD_NUMBER)" -o ./nebula-cert ./cmd/nebula-cert
+	go build -trimpath -ldflags "-X main.Build=$(BUILD_NUMBER)" -o ./nebula ${NEBULA_CMD_PATH}
+	go build -trimpath -ldflags "-X main.Build=$(BUILD_NUMBER)" -o ./nebula-cert ./cmd/nebula-cert
 
 install:
-	go install -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	go install -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
+	go install -trimpath -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
+	go install -trimpath -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
 
-bin-arm:
-	mkdir -p build/arm
-	GOARCH=arm GOOS=linux go build -o build/arm/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=arm GOOS=linux go build -o build/arm/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
+build/%/nebula: .FORCE
+	GOOS=$(firstword $(subst -, , $*)) \
+		GOARCH=$(word 2, $(subst -, ,$*)) \
+		GOARM=$(word 3, $(subst -, ,$*)) \
+		go build -trimpath -o $@ -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
 
-bin-arm6:
-	mkdir -p build/arm6
-	GOARCH=arm GOARM=6 GOOS=linux go build -o build/arm6/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=arm GOARM=6 GOOS=linux go build -o build/arm6/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
+build/%/nebula-cert: .FORCE
+	GOOS=$(firstword $(subst -, , $*)) \
+		GOARCH=$(word 2, $(subst -, ,$*)) \
+		GOARM=$(word 3, $(subst -, ,$*)) \
+		go build -trimpath -o $@ -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
 
-bin-arm64:
-	mkdir -p build/arm64
-	GOARCH=arm64 GOOS=linux go build -o build/arm64/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=arm64 GOOS=linux go build -o build/arm64/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
+build/%/nebula.exe: build/%/nebula
+	mv $< $@
 
-bin-vagrant:
-	GOARCH=amd64 GOOS=linux go build -o nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=amd64 GOOS=linux go build -ldflags "-X main.Build=$(BUILD_NUMBER)" -o ./nebula-cert ./cmd/nebula-cert
+build/%/nebula-cert.exe: build/%/nebula-cert
+	mv $< $@
 
-bin-darwin:
-	mkdir -p build/darwin
-	GOARCH=amd64 GOOS=darwin go build -o build/darwin/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=amd64 GOOS=darwin go build -o build/darwin/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
+build/nebula-%.tar.gz: build/%/nebula build/%/nebula-cert
+	tar -zcv -C build/$* -f $@ nebula nebula-cert
 
-bin-windows:
-	mkdir -p build/windows
-	GOARCH=amd64 GOOS=windows go build -o build/windows/nebula.exe -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=amd64 GOOS=windows go build -o build/windows/nebula-cert.exe -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
-
-bin-linux:
-	mkdir -p build/linux
-	GOARCH=amd64 GOOS=linux go build -o build/linux/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ${NEBULA_CMD_PATH}
-	GOARCH=amd64 GOOS=linux go build -o build/linux/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
-
-
-bin-mips:
-	mkdir -p build/mips
-	GOARCH=mips GOOS=linux go build -o build/mips/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula
-	GOARCH=mips GOOS=linux go build -o build/mips/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
-
-
-bin-mipsle:
-	mkdir -p build/mipsle
-	GOARCH=mipsle GOOS=linux go build -o build/mipsle/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula
-	GOARCH=mipsle GOOS=linux go build -o build/mipsle/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
-
-bin-mips64:
-	mkdir -p build/mips64
-	GOARCH=mips64 GOOS=linux go build -o build/mips64/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula
-	GOARCH=mips64 GOOS=linux go build -o build/mips64/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
-
-bin-mips64le:
-	mkdir -p build/mips64le
-	GOARCH=mips64le GOOS=linux go build -o build/mips64le/nebula -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula
-	GOARCH=mips64le GOOS=linux go build -o build/mips64le/nebula-cert -ldflags "-X main.Build=$(BUILD_NUMBER)" ./cmd/nebula-cert
-
-release: all
-	tar -zcv -C build/arm/ -f nebula-linux-arm.tar.gz nebula nebula-cert
-	tar -zcv -C build/arm6/ -f nebula-linux-arm6.tar.gz nebula nebula-cert
-	tar -zcv -C build/arm64/ -f nebula-linux-arm64.tar.gz nebula nebula-cert
-	tar -zcv -C build/darwin/ -f nebula-darwin-amd64.tar.gz nebula nebula-cert
-	tar -zcv -C build/windows/ -f nebula-windows-amd64.tar.gz nebula.exe nebula-cert.exe
-	tar -zcv -C build/linux/ -f nebula-linux-amd64.tar.gz nebula nebula-cert
-	tar -zcv -C build/mips/ -f nebula-linux-mips.tar.gz nebula nebula-cert
-	tar -zcv -C build/mipsle/ -f nebula-linux-mipsle.tar.gz nebula nebula-cert
-	tar -zcv -C build/mips64/ -f nebula-linux-mips64.tar.gz nebula nebula-cert
-	tar -zcv -C build/mips64le/ -f nebula-linux-mips64le.tar.gz nebula nebula-cert
+build/nebula-%.zip: build/%/nebula.exe build/%/nebula-cert.exe
+	cd build/$* && zip ../nebula-$*.zip nebula.exe nebula-cert.exe
 
 vet:
 	go vet -v ./...

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slackhq/nebula/cert"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ed25519"
-	"github.com/slackhq/nebula/cert"
 )
 
 //TODO: test file permissions
@@ -32,7 +32,7 @@ func Test_signHelp(t *testing.T) {
 			"  -ca-key string\n"+
 			"    \tOptional: path to the signing CA key (default \"ca.key\")\n"+
 			"  -duration duration\n"+
-			"    \tRequired: how long the cert should be valid for. Valid time units are seconds: \"s\", minutes: \"m\", hours: \"h\"\n"+
+			"    \tOptional: how long the cert should be valid for. The default is 1 second before the signing cert expires. Valid time units are seconds: \"s\", minutes: \"m\", hours: \"h\"\n"+
 			"  -groups string\n"+
 			"    \tOptional: comma separated list of groups\n"+
 			"  -in-pub string\n"+
@@ -253,7 +253,7 @@ func Test_signCert(t *testing.T) {
 	ob.Reset()
 	eb.Reset()
 	args = []string{"-ca-crt", caCrtF.Name(), "-ca-key", caKeyF.Name(), "-name", "test", "-ip", "1.1.1.1/24", "-out-crt", crtF.Name(), "-out-key", keyF.Name(), "-duration", "1000m", "-subnets", "10.1.1.1/32, ,   10.2.2.2/32   ,   ,  ,, 10.5.5.5/32", "-groups", "1,,   2    ,        ,,,3,4,5"}
-	assert.EqualError(t, signCert(args, ob, eb), "refusing to generate certificate with duration beyond root expiration: "+ca.Details.NotAfter.Format("2006-01-02 15:04:05 +0000 UTC"))
+	assert.EqualError(t, signCert(args, ob, eb), "refusing to sign, root certificate constraints violated: certificate expires after signing certificate")
 	assert.Empty(t, ob.String())
 	assert.Empty(t, eb.String())
 

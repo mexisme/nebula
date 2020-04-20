@@ -83,19 +83,23 @@ func newFirewallTable() *FirewallTable {
 	}
 }
 
+type FirewallCA struct {
+	Any     *FirewallRule
+	CANames map[string]*FirewallRule
+	CAShas  map[string]*FirewallRule
+}
+
 type FirewallRule struct {
-	// Any makes Hosts, Groups, and CIDR irrelevant. CAName and CASha still need to be checked
-	Any     bool
-	Hosts   map[string]struct{}
-	Groups  [][]string
-	CIDR    *CIDRTree
-	CANames map[string]struct{}
-	CAShas  map[string]struct{}
+	// Any makes Hosts, Groups, and CIDR irrelevant
+	Any    bool
+	Hosts  map[string]struct{}
+	Groups [][]string
+	CIDR   *CIDRTree
 }
 
 // Even though ports are uint16, int32 maps are faster for lookup
 // Plus we can use `-1` for fragment rules
-type firewallPort map[int32]*FirewallRule
+type firewallPort map[int32]*FirewallCA
 
 type FirewallPacket struct {
 	LocalIP    uint32
@@ -182,9 +186,9 @@ func NewFirewall(tcpTimeout, UDPTimeout, defaultTimeout time.Duration, c *cert.N
 
 func NewFirewallFromConfig(nc *cert.NebulaCertificate, c *Config) (*Firewall, error) {
 	fw := NewFirewall(
-		c.GetDuration("firewall.conntrack.tcp_timeout", time.Duration(time.Minute*12)),
-		c.GetDuration("firewall.conntrack.udp_timeout", time.Duration(time.Minute*3)),
-		c.GetDuration("firewall.conntrack.default_timeout", time.Duration(time.Minute*10)),
+		c.GetDuration("firewall.conntrack.tcp_timeout", time.Minute*12),
+		c.GetDuration("firewall.conntrack.udp_timeout", time.Minute*3),
+		c.GetDuration("firewall.conntrack.default_timeout", time.Minute*10),
 		nc,
 		//TODO: max_connections
 	)
@@ -272,7 +276,7 @@ func AddFirewallRulesFromConfig(inbound bool, config *Config, fw FirewallInterfa
 
 	for i, t := range rs {
 		var groups []string
-		r, err := convertRule(t)
+		r, err := convertRule(t, table, i)
 		if err != nil {
 			return fmt.Errorf("%s rule #%v; %s", table, i, err)
 		}
@@ -343,15 +347,33 @@ func AddFirewallRulesFromConfig(inbound bool, config *Config, fw FirewallInterfa
 	return nil
 }
 
-func (f *Firewall) Drop(packet []byte, fp FirewallPacket, incoming bool, c *cert.NebulaCertificate, caPool *cert.NebulaCAPool) bool {
+var ErrInvalidRemoteIP = errors.New("remote IP is not in remote certificate subnets")
+var ErrInvalidLocalIP = errors.New("local IP is not in list of handled local IPs")
+var ErrNoMatchingRule = errors.New("no matching rule in firewall table")
+
+// Drop returns an error if the packet should be dropped, explaining why. It
+// returns nil if the packet should not be dropped.
+func (f *Firewall) Drop(packet []byte, fp FirewallPacket, incoming bool, h *HostInfo, caPool *cert.NebulaCAPool) error {
 	// Check if we spoke to this tuple, if we did then allow this packet
 	if f.inConns(packet, fp, incoming) {
-		return false
+		return nil
+	}
+
+	// Make sure remote address matches nebula certificate
+	if remoteCidr := h.remoteCidr; remoteCidr != nil {
+		if remoteCidr.Contains(fp.RemoteIP) == nil {
+			return ErrInvalidRemoteIP
+		}
+	} else {
+		// Simple case: Certificate has one IP and no subnets
+		if fp.RemoteIP != h.hostId {
+			return ErrInvalidRemoteIP
+		}
 	}
 
 	// Make sure we are supposed to be handling this local ip address
 	if f.localIps.Contains(fp.LocalIP) == nil {
-		return true
+		return ErrInvalidLocalIP
 	}
 
 	table := f.OutRules
@@ -360,14 +382,14 @@ func (f *Firewall) Drop(packet []byte, fp FirewallPacket, incoming bool, c *cert
 	}
 
 	// We now know which firewall table to check against
-	if !table.match(fp, incoming, c, caPool) {
-		return true
+	if !table.match(fp, incoming, h.ConnectionState.peerCert, caPool) {
+		return ErrNoMatchingRule
 	}
 
 	// We always want to conntrack since it is a faster operation
 	f.addConn(packet, fp, incoming)
 
-	return false
+	return nil
 }
 
 // Destroy cleans up any known cyclical references so the object can be free'd my GC. This should be called if a new
@@ -494,12 +516,9 @@ func (fp firewallPort) addRule(startPort int32, endPort int32, groups []string, 
 
 	for i := startPort; i <= endPort; i++ {
 		if _, ok := fp[i]; !ok {
-			fp[i] = &FirewallRule{
-				Groups:  make([][]string, 0),
-				Hosts:   make(map[string]struct{}),
-				CIDR:    NewCIDRTree(),
-				CANames: make(map[string]struct{}),
-				CAShas:  make(map[string]struct{}),
+			fp[i] = &FirewallCA{
+				CANames: make(map[string]*FirewallRule),
+				CAShas:  make(map[string]*FirewallRule),
 			}
 		}
 
@@ -534,15 +553,70 @@ func (fp firewallPort) match(p FirewallPacket, incoming bool, c *cert.NebulaCert
 	return fp[fwPortAny].match(p, c, caPool)
 }
 
-func (fr *FirewallRule) addRule(groups []string, host string, ip *net.IPNet, caName string, caSha string) error {
-	if caName != "" {
-		fr.CANames[caName] = struct{}{}
+func (fc *FirewallCA) addRule(groups []string, host string, ip *net.IPNet, caName, caSha string) error {
+	fr := func() *FirewallRule {
+		return &FirewallRule{
+			Hosts:  make(map[string]struct{}),
+			Groups: make([][]string, 0),
+			CIDR:   NewCIDRTree(),
+		}
+	}
+
+	if caSha == "" && caName == "" {
+		if fc.Any == nil {
+			fc.Any = fr()
+		}
+
+		return fc.Any.addRule(groups, host, ip)
 	}
 
 	if caSha != "" {
-		fr.CAShas[caSha] = struct{}{}
+		if _, ok := fc.CAShas[caSha]; !ok {
+			fc.CAShas[caSha] = fr()
+		}
+		err := fc.CAShas[caSha].addRule(groups, host, ip)
+		if err != nil {
+			return err
+		}
 	}
 
+	if caName != "" {
+		if _, ok := fc.CANames[caName]; !ok {
+			fc.CANames[caName] = fr()
+		}
+		err := fc.CANames[caName].addRule(groups, host, ip)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (fc *FirewallCA) match(p FirewallPacket, c *cert.NebulaCertificate, caPool *cert.NebulaCAPool) bool {
+	if fc == nil {
+		return false
+	}
+
+	if fc.Any.match(p, c) {
+		return true
+	}
+
+	if t, ok := fc.CAShas[c.Details.Issuer]; ok {
+		if t.match(p, c) {
+			return true
+		}
+	}
+
+	s, err := caPool.GetCAForCert(c)
+	if err != nil {
+		return false
+	}
+
+	return fc.CANames[s.Details.Name].match(p, c)
+}
+
+func (fr *FirewallRule) addRule(groups []string, host string, ip *net.IPNet) error {
 	if fr.Any {
 		return nil
 	}
@@ -571,6 +645,10 @@ func (fr *FirewallRule) addRule(groups []string, host string, ip *net.IPNet, caN
 }
 
 func (fr *FirewallRule) isAny(groups []string, host string, ip *net.IPNet) bool {
+	if len(groups) == 0 && host == "" && ip == nil {
+		return true
+	}
+
 	for _, group := range groups {
 		if group == "any" {
 			return true
@@ -588,26 +666,9 @@ func (fr *FirewallRule) isAny(groups []string, host string, ip *net.IPNet) bool 
 	return false
 }
 
-func (fr *FirewallRule) match(p FirewallPacket, c *cert.NebulaCertificate, caPool *cert.NebulaCAPool) bool {
+func (fr *FirewallRule) match(p FirewallPacket, c *cert.NebulaCertificate) bool {
 	if fr == nil {
 		return false
-	}
-
-	// CASha and CAName always need to be checked
-	if len(fr.CAShas) > 0 {
-		if _, ok := fr.CAShas[c.Details.Issuer]; !ok {
-			return false
-		}
-	}
-
-	if len(fr.CANames) > 0 {
-		s, err := caPool.GetCAForCert(c)
-		if err != nil {
-			return false
-		}
-		if _, ok := fr.CANames[s.Details.Name]; !ok {
-			return false
-		}
 	}
 
 	// Shortcut path for if groups, hosts, or cidr contained an `any`
@@ -659,7 +720,7 @@ type rule struct {
 	CASha  string
 }
 
-func convertRule(p interface{}) (rule, error) {
+func convertRule(p interface{}, table string, i int) (rule, error) {
 	r := rule{}
 
 	m, ok := p.(map[interface{}]interface{})
@@ -679,10 +740,20 @@ func convertRule(p interface{}) (rule, error) {
 	r.Code = toString("code", m)
 	r.Proto = toString("proto", m)
 	r.Host = toString("host", m)
-	r.Group = toString("group", m)
 	r.Cidr = toString("cidr", m)
 	r.CAName = toString("ca_name", m)
 	r.CASha = toString("ca_sha", m)
+
+	// Make sure group isn't an array
+	if v, ok := m["group"].([]interface{}); ok {
+		if len(v) > 1 {
+			return r, errors.New("group should contain a single value, an array with more than one entry was provided")
+		}
+
+		l.Warnf("%s rule #%v; group was an array with a single value, converting to simple value", table, i)
+		m["group"] = v[0]
+	}
+	r.Group = toString("group", m)
 
 	if rg, ok := m["groups"]; ok {
 		switch reflect.TypeOf(rg).Kind() {
@@ -758,7 +829,7 @@ func setTCPRTTTracking(c *conn, p []byte) {
 	ihl := int(p[0]&0x0f) << 2
 
 	// Don't track FIN packets
-	if uint8(p[ihl+13])&tcpFIN != 0 {
+	if p[ihl+13]&tcpFIN != 0 {
 		return
 	}
 
@@ -772,7 +843,7 @@ func (f *Firewall) checkTCPRTT(c *conn, p []byte) bool {
 	}
 
 	ihl := int(p[0]&0x0f) << 2
-	if uint8(p[ihl+13])&tcpACK == 0 {
+	if p[ihl+13]&tcpACK == 0 {
 		return false
 	}
 
